@@ -1,8 +1,8 @@
 {
   "version": 2,
-  "name": "vercel-edge-relay",
+  "name": "fast-edge-gateway",
   "rewrites": [
-    { "source": "/(.*)", "destination": "/api/index" }
+    { "source": "/(.*)", "destination": "/api/edge/route" }
   ],
   "trailingSlash": false
 }
