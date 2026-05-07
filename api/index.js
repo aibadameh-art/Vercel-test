@@ -1,8 +1,8 @@
 export const config = { runtime: "edge" };
 
-const DEST_BASE = (process.env.TARGET_DOMAIN || "").replace(/\/$/, "");
+const UPSTREAM_BASE = (process.env.TARGET_DOMAIN || "").replace(/\/$/, "");
 
-const REMOVE_HEADERS = new Set([
+const SKIP_HEADERS = new Set([
   "host",
   "connection",
   "keep-alive",
@@ -18,48 +18,59 @@ const REMOVE_HEADERS = new Set([
   "x-forwarded-port",
 ]);
 
-export default async function handler(request) {
-  if (!DEST_BASE) {
-    return new Response("Misconfigured: TARGET_DOMAIN is not set", { status: 500 });
+export default async function handleRequest(incoming) {
+  if (!UPSTREAM_BASE) {
+    return new Response("Service not ready: missing upstream configuration", { status: 500 });
   }
 
   try {
-    const slashIndex = request.url.indexOf("/", 8);
-    const finalUrl =
-      slashIndex === -1 ? DEST_BASE + "/" : DEST_BASE + request.url.slice(slashIndex);
+    const slashPos = incoming.url.indexOf("/", 8);
+    const fullPath = slashPos === -1 ? UPSTREAM_BASE + "/" : UPSTREAM_BASE + incoming.url.slice(slashPos);
 
-    const cleanHeaders = new Headers();
-    let originalIp = null;
+    const outgoingHeaders = new Headers();
+    let realClientIp = null;
 
-    for (const [key, value] of request.headers) {
-      if (REMOVE_HEADERS.has(key)) continue;
-      if (key.startsWith("x-vercel-")) continue;
-      if (key === "x-real-ip") {
-        originalIp = value;
+    for (const [hName, hVal] of incoming.headers) {
+      if (SKIP_HEADERS.has(hName)) continue;
+      if (hName.startsWith("x-vercel-")) continue;
+      if (hName === "x-real-ip") {
+        realClientIp = hVal;
         continue;
       }
-      if (key === "x-forwarded-for") {
-        if (!originalIp) originalIp = value;
+      if (hName === "x-forwarded-for") {
+        if (!realClientIp) realClientIp = hVal;
         continue;
       }
-      cleanHeaders.set(key, value);
+      outgoingHeaders.set(hName, hVal);
     }
 
-    if (originalIp) cleanHeaders.set("x-forwarded-for", originalIp);
+    if (realClientIp) outgoingHeaders.set("x-forwarded-for", realClientIp);
 
-    const httpMethod = request.method;
-    const supportsBody = httpMethod !== "GET" && httpMethod !== "HEAD";
+    const verb = incoming.method;
+    const canHaveBody = verb !== "GET" && verb !== "HEAD";
 
-    return await fetch(finalUrl, {
-      method: httpMethod,
-      headers: cleanHeaders,
-      body: supportsBody ? request.body : undefined,
+    const upstreamResp = await fetch(fullPath, {
+      method: verb,
+      headers: outgoingHeaders,
+      body: canHaveBody ? incoming.body : undefined,
       duplex: "half",
       redirect: "manual",
     });
 
-  } catch (error) {
-    console.error("relay error:", error);
-    return new Response("Bad Gateway: Tunnel Failed", { status: 502 });
+    const cleanRespHeaders = new Headers(upstreamResp.headers);
+    cleanRespHeaders.delete("via");
+    cleanRespHeaders.delete("x-powered-by");
+    cleanRespHeaders.delete("server");
+    cleanRespHeaders.set("server", "cloudflare");
+
+    return new Response(upstreamResp.body, {
+      status: upstreamResp.status,
+      statusText: upstreamResp.statusText,
+      headers: cleanRespHeaders,
+    });
+
+  } catch (failure) {
+    console.error("proxy failure:", failure);
+    return new Response("Service Unavailable", { status: 502 });
   }
 }
